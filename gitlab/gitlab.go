@@ -11,7 +11,7 @@ import (
 	"github.com/cooperspencer/gickup/logger"
 	"github.com/cooperspencer/gickup/types"
 	"github.com/rs/zerolog"
-	"gitlab.com/gitlab-org/api/client-go"
+	gitlab "gitlab.com/gitlab-org/api/client-go"
 )
 
 var (
@@ -599,36 +599,38 @@ func GetOrCreate(destination types.GenRepo, repo types.Repo) (string, error) {
 	if err != nil {
 		return "", err
 	}
-
-	user, _, err := client.Users.CurrentUser()
+	currentUser, _, err := client.Users.CurrentUser()
 	if err != nil {
 		return "", err
 	}
-	me := user
-
-	if destination.User == "" {
-		destination.User = me.Username
+	targetNamespace := currentUser.Username
+	if destination.User != "" {
+		targetNamespace = destination.User
 	}
 
-	repos, _, err := client.Projects.ListProjects(&gitlab.ListProjectsOptions{Search: &repo.Name})
-
-	if err != nil {
-		return "", err
-	}
-
-	for _, repository := range repos {
-		if repository.Owner == nil {
-			continue
-		}
-		if repository.Name == repo.Name && repository.Owner.Username == me.Username {
-			return repository.HTTPURLToRepo, nil
-		}
+	// Check if project already exists by direct lookup
+	fullPath := fmt.Sprintf("%s/%s", targetNamespace, repo.Name)
+	existingProject, _, err := client.Projects.GetProject(fullPath, &gitlab.GetProjectOptions{})
+	if err == nil && existingProject != nil {
+		return existingProject.HTTPURLToRepo, nil
 	}
 
 	opts := gitlab.CreateProjectOptions{
 		Name:        gitlab.Ptr(repo.Name),
 		Visibility:  gitlab.Ptr(visibility),
 		Description: gitlab.Ptr(repo.Description),
+	}
+
+	if targetNamespace != currentUser.Username {
+		group, _, err := client.Groups.GetGroup(targetNamespace, &gitlab.GetGroupOptions{})
+		if err == nil {
+			opts.NamespaceID = &group.ID
+		} else {
+			users, _, err := client.Users.ListUsers(&gitlab.ListUsersOptions{Username: &targetNamespace})
+			if err != nil || len(users) == 0 {
+				return "", fmt.Errorf("target namespace %s not found", targetNamespace)
+			}
+		}
 	}
 
 	r, _, err := client.Projects.CreateProject(&opts)
